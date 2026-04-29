@@ -211,4 +211,196 @@ class Scheduler:
         return "\n".join(lines)
 
 
-__all__ = ["Task", "Pet", "Owner", "Scheduler"]
+__all__ = ["Task", "Pet", "Owner", "Scheduler", "SchedulingAgent"]
+
+
+class SchedulingAgent:
+    """
+    Autonomous agent for pet care scheduling.
+    
+    This agent handles the scheduling workflow:
+    1. Gather requirements from user
+    2. Parse constraints from natural language
+    3. Generate schedule using the Scheduler
+    4. Provide explanations for decisions
+    """
+    
+    def __init__(self):
+        self.scheduler = Scheduler()
+        self.preferences = {}
+        self.conversation_history = []
+    
+    def gather_requirements(self, owner: Owner, user_input: str) -> dict:
+        """
+        Parse natural language input into scheduling constraints.
+        
+        Args:
+            owner: The pet owner
+            user_input: Natural language request from user
+            
+        Returns:
+            Dictionary of scheduling constraints
+        """
+        constraints = {
+            "start_time": datetime.now().replace(hour=8, minute=0, second=0, microsecond=0),
+            "end_time": datetime.now().replace(hour=20, minute=0, second=0, microsecond=0),
+            "preferred_times": [],
+            "task_types": [],
+            "break_minutes": 0,
+            "pet_energy_levels": {},
+        }
+        
+        # Simple keyword-based parsing (can be replaced with LLM later)
+        user_lower = user_input.lower()
+        
+        # Time preferences
+        if "morning" in user_lower:
+            constraints["preferred_times"].append("morning")
+            constraints["start_time"] = datetime.now().replace(hour=7, minute=0)
+            constraints["end_time"] = datetime.now().replace(hour=12, minute=0)
+        if "afternoon" in user_lower:
+            constraints["preferred_times"].append("afternoon")
+            constraints["start_time"] = datetime.now().replace(hour=12, minute=0)
+            constraints["end_time"] = datetime.now().replace(hour=17, minute=0)
+        if "evening" in user_lower:
+            constraints["preferred_times"].append("evening")
+            constraints["start_time"] = datetime.now().replace(hour=17, minute=0)
+            constraints["end_time"] = datetime.now().replace(hour=21, minute=0)
+        
+        # Task type preferences
+        task_keywords = {
+            "walk": ["walk", "walking", "stroll"],
+            "feed": ["feed", "feeding", "food", "meal"],
+            "groom": ["groom", "grooming", "brush"],
+            "vet": ["vet", "veterinarian", "checkup"],
+            "play": ["play", "playing", "exercise"],
+            "bath": ["bath", "bathing", "wash"],
+        }
+        
+        for task_type, keywords in task_keywords.items():
+            if any(kw in user_lower for kw in keywords):
+                constraints["task_types"].append(task_type)
+        
+        # Break time
+        if "break" in user_lower:
+            # Extract number if present
+            import re
+            match = re.search(r'(\d+)\s*min', user_lower)
+            if match:
+                constraints["break_minutes"] = int(match.group(1))
+            else:
+                constraints["break_minutes"] = 15  # default 15 min break
+        
+        # Energy levels
+        if "energy" in user_lower or "tired" in user_lower:
+            if "high energy" in user_lower or "active" in user_lower:
+                constraints["pet_energy_levels"] = {"level": "high", "prefer_active_tasks": True}
+            elif "low energy" in user_lower or "tired" in user_lower:
+                constraints["pet_energy_levels"] = {"level": "low", "prefer_active_tasks": False}
+        
+        return constraints
+    
+    def generate_schedule(self, owner: Owner, constraints: dict) -> dict:
+        """
+        Generate schedule based on constraints.
+        
+        Args:
+            owner: The pet owner
+            constraints: Scheduling constraints from gather_requirements
+            
+        Returns:
+            Dictionary with schedule, explanation, and any warnings
+        """
+        # Use scheduler to assign times
+        scheduled_tasks = self.scheduler.assign_times(
+            owner,
+            constraints["start_time"],
+            constraints["end_time"]
+        )
+        
+        # Generate explanation
+        explanation = self._generate_explanation(scheduled_tasks, constraints)
+        
+        # Get conflict warnings
+        warnings = self.scheduler.conflict_warnings
+        
+        return {
+            "tasks": scheduled_tasks,
+            "explanation": explanation,
+            "warnings": warnings,
+            "constraints_used": constraints,
+        }
+    
+    def _generate_explanation(self, scheduled_tasks: List[Task], constraints: dict) -> str:
+        """Generate human-readable explanation for the schedule."""
+        if not scheduled_tasks:
+            return "No tasks could be scheduled within the given time constraints."
+        
+        lines = ["📋 Schedule Explanation:", ""]
+        
+        # Explain time window
+        start_str = constraints["start_time"].strftime("%H:%M")
+        end_str = constraints["end_time"].strftime("%H:%M")
+        lines.append(f"• Time window: {start_str} - {end_str}")
+        
+        # Explain task selection
+        lines.append(f"• Scheduled {len(scheduled_tasks)} task(s) based on:")
+        
+        if constraints["preferred_times"]:
+            lines.append(f"  - Preferred time(s): {', '.join(constraints['preferred_times'])}")
+        
+        if constraints["task_types"]:
+            lines.append(f"  - Requested task types: {', '.join(constraints['task_types'])}")
+        
+        if constraints["break_minutes"] > 0:
+            lines.append(f"  - Break time: {constraints['break_minutes']} minutes")
+        
+        if constraints["pet_energy_levels"]:
+            level = constraints["pet_energy_levels"].get("level", "unknown")
+            lines.append(f"  - Pet energy level: {level}")
+        
+        # List scheduled tasks
+        lines.append("")
+        lines.append("Scheduled Tasks:")
+        for i, task in enumerate(scheduled_tasks, 1):
+            start = task.scheduled_start.strftime("%H:%M") if task.scheduled_start else "TBD"
+            end = task.scheduled_end.strftime("%H:%M") if task.scheduled_end else "TBD"
+            lines.append(f"  {i}. {task.description} ({start} - {end}, {task.duration_minutes} min)")
+        
+        return "\n".join(lines)
+    
+    def plan(self, owner: Owner, user_request: str) -> dict:
+        """
+        Main agent loop: understand → plan → explain.
+        
+        Args:
+            owner: The pet owner
+            user_request: Natural language request from user
+            
+        Returns:
+            Dictionary with schedule, explanation, and warnings
+        """
+        # Store conversation
+        self.conversation_history.append({"role": "user", "content": user_request})
+        
+        # Step 1: Understand constraints
+        constraints = self.gather_requirements(owner, user_request)
+        
+        # Step 2: Generate schedule
+        result = self.generate_schedule(owner, constraints)
+        
+        # Step 3: Store response in history
+        self.conversation_history.append({
+            "role": "assistant", 
+            "content": result["explanation"]
+        })
+        
+        return result
+    
+    def get_conversation_history(self) -> List[dict]:
+        """Return the conversation history."""
+        return list(self.conversation_history)
+    
+    def clear_history(self) -> None:
+        """Clear conversation history."""
+        self.conversation_history = []
