@@ -52,6 +52,15 @@ The scheduler now includes:
 - Conflict detection (`Scheduler.detect_conflicts`) that returns warnings for overlapping tasks instead of crashing.
 - Human-readable explanation output via `Scheduler.explain` including conflict warnings.
 
+The update includes agentic workflow elements, creating a scheduling agent that handles the scheduling logic and interacts with the user to gather necessary information for scheduling. The agent would be responsible for understanding user preferences, constraints, and generating a schedule accordingly.
+
+Limitations it should tackle: 
+    - handling priority considerations rather than the greedy approach of scheduling the shortest task first. 
+    - ensuring that the generated schedule is feasible and efficient and considering the time constraints of the user and the pet's needs, e.g accouting for the break time and the energy levels of the pet and the user.
+    - providing explanations for the generated schedule to help the user understand the reasoning behind it.  
+
+## 📸 System Diagram
+ <a href="/assets/system-diagram.png" target="_blank"><img src='/assets/system-diagram.png' title='PawPal App' width='' alt='PawPal App' class='center-block' /></a>.
 ## Testing PawPal+
 To run tests, type the following command in the terminal:
 
