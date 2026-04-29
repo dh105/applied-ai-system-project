@@ -1,3 +1,34 @@
+1. Create a virtual environment (recommended)
+python -m venv .venv
+source .venv/bin/activate   # macOS/Linux
+# or
+.venv\Scripts\activate      # Windows
+2. Install dependencies
+pip install -r requirements.txt
+Running
+streamlit run app.py
+At the bottom, select:
+
+Model mode: SchedulinAgent
+This mode uses simple pattern-based rules and is useful for testing the workflow without network access.
+
+Running with Gemini
+1. Set up your API key
+Copy the example file:
+
+cp .env.example .env
+Edit .env and add your Gemini API key:
+
+GEMINI_API_KEY=your_real_key_here
+2. Run the app
+streamlit run bughound_app.py
+In the sidebar, select:
+
+Model mode: Gemini (requires API key)
+Choose a Gemini model and temperature
+Pawpal will now use Gemini for analysis and fix generation, while still applying local reliability checks.
+
+
 # PawPal+ (Module 2 Project)
 
 You are building **PawPal+**, a Streamlit app that helps a pet owner plan care tasks for their pet.

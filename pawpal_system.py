@@ -1,6 +1,11 @@
+import json
+import os
+from google import genai
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import List, Optional
+
+PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 @dataclass
 class Task:
@@ -11,6 +16,7 @@ class Task:
     scheduled_end: Optional[datetime] = None
     frequency: Optional[str] = None  # e.g., "daily", "weekly"
     is_completed: bool = False
+    priority: str = "medium"  # "high", "medium", or "low"
 
     def mark_completed(self, when: Optional[datetime] = None):
         """Mark this task as completed and create next recurring instance if needed."""
@@ -133,19 +139,20 @@ class Scheduler:
         """Retrieve pending tasks from the owner."""
         return owner.get_pending_tasks()
 
-    def assign_times(self, owner: Owner, start_time: datetime, end_time: datetime) -> List[Task]:
+    def assign_times(self, owner: Owner, start_time: datetime, end_time: datetime, break_minutes: int = 0) -> List[Task]:
         """Assign tasks to time slots between start_time and end_time."""
         remaining_minutes = int((end_time - start_time).total_seconds() / 60)
-        pending = sorted(self.retrieve_tasks(owner), key=lambda t: (t.is_completed, t.duration_minutes, t.description))
+        pending = sorted(self.retrieve_tasks(owner), key=lambda t: (t.is_completed, PRIORITY_ORDER.get(t.priority, 1), t.duration_minutes, t.description))
         scheduled = []
         cursor = start_time
 
         for task in pending:
-            if task.duration_minutes <= remaining_minutes:
+            slot_needed = task.duration_minutes + (break_minutes if scheduled else 0)
+            if slot_needed <= remaining_minutes:
                 task.scheduled_start = cursor
                 task.scheduled_end = cursor + timedelta(minutes=task.duration_minutes)
-                remaining_minutes -= task.duration_minutes
-                cursor = task.scheduled_end
+                remaining_minutes -= slot_needed
+                cursor = task.scheduled_end + timedelta(minutes=break_minutes)
                 scheduled.append(task)
             else:
                 continue
@@ -225,22 +232,76 @@ class SchedulingAgent:
     4. Provide explanations for decisions
     """
     
-    def __init__(self):
+    def __init__(self, use_llm: bool = False):
         self.scheduler = Scheduler()
         self.preferences = {}
         self.conversation_history = []
-    
+        self.use_llm = use_llm
+
+    def _gather_requirements_llm(self, user_input: str) -> dict:
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+        prompt = f"""Parse this pet care scheduling request into JSON.
+
+Request: "{user_input}"
+
+Return ONLY valid JSON with these exact keys:
+{{
+  "preferred_times": [],
+  "task_types": [],
+  "break_minutes": 0,
+  "pet_energy_levels": {{}}
+}}
+
+preferred_times: list containing any of "morning", "afternoon", "evening"
+task_types: list containing any of "walk", "feed", "groom", "play", "vet", "bath"
+break_minutes: integer minutes of break between tasks (0 if not mentioned)
+pet_energy_levels: {{"level": "high" or "low", "prefer_active_tasks": true or false}} or {{}}"""
+
+        try:
+            response = client.models.generate_content(model="gemini-2.0-flash-lite", contents=prompt)
+            text = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            parsed = json.loads(text)
+        except Exception:
+            # API unavailable or quota exceeded — fall back to keyword parsing
+            return self._gather_requirements_keyword(user_input)
+
+        constraints = {
+            "start_time": datetime.now().replace(hour=8, minute=0, second=0, microsecond=0),
+            "end_time":   datetime.now().replace(hour=20, minute=0, second=0, microsecond=0),
+            "preferred_times":   parsed.get("preferred_times", []),
+            "task_types":        parsed.get("task_types", []),
+            "break_minutes":     parsed.get("break_minutes", 0),
+            "pet_energy_levels": parsed.get("pet_energy_levels", {}),
+        }
+
+        time_map = {"morning": (7, 12), "afternoon": (12, 17), "evening": (17, 21)}
+        for period in constraints["preferred_times"]:
+            if period in time_map:
+                start_h, end_h = time_map[period]
+                constraints["start_time"] = datetime.now().replace(hour=start_h, minute=0, second=0, microsecond=0)
+                constraints["end_time"]   = datetime.now().replace(hour=end_h,   minute=0, second=0, microsecond=0)
+
+        return constraints
+
     def gather_requirements(self, owner: Owner, user_input: str) -> dict:
         """
         Parse natural language input into scheduling constraints.
-        
+
         Args:
             owner: The pet owner
             user_input: Natural language request from user
-            
+
         Returns:
             Dictionary of scheduling constraints
         """
+        if self.use_llm:
+            return self._gather_requirements_llm(user_input)
+        return self._gather_requirements_keyword(user_input)
+
+    def _gather_requirements_keyword(self, user_input: str) -> dict:
+        """Keyword-based fallback parser."""
+        import re
         constraints = {
             "start_time": datetime.now().replace(hour=8, minute=0, second=0, microsecond=0),
             "end_time": datetime.now().replace(hour=20, minute=0, second=0, microsecond=0),
@@ -249,11 +310,9 @@ class SchedulingAgent:
             "break_minutes": 0,
             "pet_energy_levels": {},
         }
-        
-        # Simple keyword-based parsing (can be replaced with LLM later)
+
         user_lower = user_input.lower()
-        
-        # Time preferences
+
         if "morning" in user_lower:
             constraints["preferred_times"].append("morning")
             constraints["start_time"] = datetime.now().replace(hour=7, minute=0)
@@ -266,8 +325,7 @@ class SchedulingAgent:
             constraints["preferred_times"].append("evening")
             constraints["start_time"] = datetime.now().replace(hour=17, minute=0)
             constraints["end_time"] = datetime.now().replace(hour=21, minute=0)
-        
-        # Task type preferences
+
         task_keywords = {
             "walk": ["walk", "walking", "stroll"],
             "feed": ["feed", "feeding", "food", "meal"],
@@ -276,28 +334,20 @@ class SchedulingAgent:
             "play": ["play", "playing", "exercise"],
             "bath": ["bath", "bathing", "wash"],
         }
-        
         for task_type, keywords in task_keywords.items():
             if any(kw in user_lower for kw in keywords):
                 constraints["task_types"].append(task_type)
-        
-        # Break time
+
         if "break" in user_lower:
-            # Extract number if present
-            import re
             match = re.search(r'(\d+)\s*min', user_lower)
-            if match:
-                constraints["break_minutes"] = int(match.group(1))
-            else:
-                constraints["break_minutes"] = 15  # default 15 min break
-        
-        # Energy levels
+            constraints["break_minutes"] = int(match.group(1)) if match else 15
+
         if "energy" in user_lower or "tired" in user_lower:
             if "high energy" in user_lower or "active" in user_lower:
                 constraints["pet_energy_levels"] = {"level": "high", "prefer_active_tasks": True}
             elif "low energy" in user_lower or "tired" in user_lower:
                 constraints["pet_energy_levels"] = {"level": "low", "prefer_active_tasks": False}
-        
+
         return constraints
     
     def generate_schedule(self, owner: Owner, constraints: dict) -> dict:
@@ -315,7 +365,8 @@ class SchedulingAgent:
         scheduled_tasks = self.scheduler.assign_times(
             owner,
             constraints["start_time"],
-            constraints["end_time"]
+            constraints["end_time"],
+            break_minutes=constraints.get("break_minutes", 0),
         )
         
         # Generate explanation
@@ -323,12 +374,16 @@ class SchedulingAgent:
         
         # Get conflict warnings
         warnings = self.scheduler.conflict_warnings
-        
+
+        total = len(owner.get_pending_tasks())
+        coverage = len(scheduled_tasks) / total if total > 0 else 1.0
+
         return {
             "tasks": scheduled_tasks,
             "explanation": explanation,
             "warnings": warnings,
             "constraints_used": constraints,
+            "coverage_rate": coverage,
         }
     
     def _generate_explanation(self, scheduled_tasks: List[Task], constraints: dict) -> str:

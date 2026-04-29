@@ -1,7 +1,11 @@
+import os
 import streamlit as st
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from pawpal_system import Owner, Pet, Scheduler, Task, SchedulingAgent
 
-from pawpal_system import Owner, Pet, Scheduler, Task
+load_dotenv()
+
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
 st.title("🐾 PawPal+")
@@ -106,63 +110,215 @@ else:
 st.divider()
 
 st.subheader("Build Schedule")
-st.caption("Generate and display today's schedule using your Scheduler class.")
 
-col_start, col_hours = st.columns(2)
-with col_start:
-    schedule_start = st.time_input("Start time", value=datetime.now().replace(second=0, microsecond=0).time())
-with col_hours:
-    schedule_hours = st.number_input("Planning window (hours)", min_value=1, max_value=24, value=8)
+scheduler_mode = st.radio("Scheduling mode", ["Scheduler", "SchedulingAgent", "LLM Agent"], horizontal=True)
 
-if st.button("Generate schedule"):
-    if not st.session_state.tasks:
-        st.warning("Add at least one task before generating a schedule.")
-    else:
-        owner = Owner(id="owner-1", name=owner_name)
-        pet = Pet(id="pet-1", name=pet_name, species=species)
+if scheduler_mode == "Scheduler":
+    st.caption("Assign tasks to a time window using the rule-based Scheduler.")
+    col_start, col_hours = st.columns(2)
+    with col_start:
+        schedule_start = st.time_input("Start time", value=datetime.now().replace(second=0, microsecond=0).time())
+    with col_hours:
+        schedule_hours = st.number_input("Planning window (hours)", min_value=1, max_value=24, value=8)
 
-        for index, task_data in enumerate(st.session_state.tasks, start=1):
-            pet.add_task(
-                Task(
-                    id=f"task-{index}",
-                    description=task_data["title"],
-                    duration_minutes=task_data["duration_minutes"],
+    if st.button("Generate schedule"):
+        if not st.session_state.tasks:
+            st.warning("Add at least one task before generating a schedule.")
+        else:
+            owner = Owner(id="owner-1", name=owner_name)
+            pet = Pet(id="pet-1", name=pet_name, species=species)
+
+            for index, task_data in enumerate(st.session_state.tasks, start=1):
+                pet.add_task(
+                    Task(
+                        id=f"task-{index}",
+                        description=task_data["title"],
+                        duration_minutes=task_data["duration_minutes"],
+                    )
                 )
+
+            owner.add_pet(pet)
+            scheduler = Scheduler()
+
+            today = datetime.now()
+            start_dt = datetime.combine(today.date(), schedule_start)
+            end_dt = start_dt + timedelta(hours=int(schedule_hours))
+
+            scheduler.assign_times(owner, start_dt, end_dt)
+            scheduled_tasks = sorted(
+                scheduler.get_today_schedule(),
+                key=lambda t: t.scheduled_start or datetime.max,
             )
 
-        owner.add_pet(pet)
-        scheduler = Scheduler()
+            if not scheduled_tasks:
+                st.info("No tasks could be scheduled in the selected time window.")
+            else:
+                st.success("Schedule generated.")
+                st.markdown("### Planned Tasks")
+                table_rows = [
+                    {
+                        "Task": task.description,
+                        "Start": task.scheduled_start.strftime("%H:%M") if task.scheduled_start else "-",
+                        "End": task.scheduled_end.strftime("%H:%M") if task.scheduled_end else "-",
+                        "Duration (min)": task.duration_minutes,
+                    }
+                    for task in scheduled_tasks
+                ]
+                st.table(table_rows)
 
-        today = datetime.now()
-        start_dt = datetime.combine(today.date(), schedule_start)
-        end_dt = start_dt + timedelta(hours=int(schedule_hours))
+                st.markdown("### Explanation")
+                st.code(scheduler.explain(scheduled_tasks), language="text")
 
-        scheduler.assign_times(owner, start_dt, end_dt)
-        scheduled_tasks = sorted(
-            scheduler.get_today_schedule(),
-            key=lambda t: t.scheduled_start or datetime.max,
-        )
+                if scheduler.conflict_warnings:
+                    st.markdown("### Conflict Warnings")
+                    for warning in scheduler.conflict_warnings:
+                        st.warning(warning)
 
-        if not scheduled_tasks:
-            st.info("No tasks could be scheduled in the selected time window.")
+elif scheduler_mode == "SchedulingAgent":
+    st.caption("Describe what you need in natural language. The agent will parse your request and build a schedule.")
+
+    user_request = st.text_area(
+        "What would you like to schedule?",
+        placeholder="e.g., Schedule my morning walk and feeding with a 15 min break",
+        height=80,
+    )
+
+    col_start, col_end = st.columns(2)
+    with col_start:
+        agent_start = st.time_input("Start time", value=datetime.strptime("08:00", "%H:%M").time(), key="agent_start")
+    with col_end:
+        agent_end = st.time_input("End time", value=datetime.strptime("20:00", "%H:%M").time(), key="agent_end")
+
+    if st.button("Generate schedule", key="agent_generate"):
+        if not st.session_state.tasks:
+            st.warning("Add at least one task before generating a schedule.")
+        elif not user_request.strip():
+            st.warning("Enter a scheduling request above.")
         else:
-            st.success("Schedule generated.")
-            st.markdown("### Planned Tasks")
-            table_rows = [
-                {
-                    "Task": task.description,
-                    "Start": task.scheduled_start.strftime("%H:%M") if task.scheduled_start else "-",
-                    "End": task.scheduled_end.strftime("%H:%M") if task.scheduled_end else "-",
-                    "Duration (min)": task.duration_minutes,
-                }
-                for task in scheduled_tasks
-            ]
-            st.table(table_rows)
+            owner = Owner(id="owner-1", name=owner_name)
+            pet = Pet(id="pet-1", name=pet_name, species=species)
 
-            st.markdown("### Explanation")
-            st.code(scheduler.explain(scheduled_tasks), language="text")
+            for index, task_data in enumerate(st.session_state.tasks, start=1):
+                pet.add_task(
+                    Task(
+                        id=f"task-{index}",
+                        description=task_data["title"],
+                        duration_minutes=task_data["duration_minutes"],
+                    )
+                )
 
-            if scheduler.conflict_warnings:
-                st.markdown("### Conflict Warnings")
-                for warning in scheduler.conflict_warnings:
-                    st.warning(warning)
+            owner.add_pet(pet)
+            agent = SchedulingAgent()
+
+            today = datetime.now()
+            constraints = agent.gather_requirements(owner, user_request)
+            if not constraints.get("preferred_times"):
+                constraints["start_time"] = datetime.combine(today.date(), agent_start)
+                constraints["end_time"] = datetime.combine(today.date(), agent_end)
+
+            result = agent.generate_schedule(owner, constraints)
+            scheduled_tasks = result["tasks"]
+
+            if not scheduled_tasks:
+                st.info("No tasks could be scheduled in the selected time window.")
+            else:
+                st.success("Schedule generated.")
+                st.markdown("### Planned Tasks")
+                table_rows = [
+                    {
+                        "Task": task.description,
+                        "Start": task.scheduled_start.strftime("%H:%M") if task.scheduled_start else "-",
+                        "End": task.scheduled_end.strftime("%H:%M") if task.scheduled_end else "-",
+                        "Duration (min)": task.duration_minutes,
+                    }
+                    for task in scheduled_tasks
+                ]
+                st.table(table_rows)
+
+                coverage = result.get("coverage_rate", 1.0)
+                st.metric("Schedule Coverage", f"{coverage:.0%}", help="Percentage of pending tasks that fit in the time window")
+
+                if result["explanation"]:
+                    st.markdown("### Agent Explanation")
+                    st.code(result["explanation"], language="text")
+
+                if result["warnings"]:
+                    st.markdown("### Conflict Warnings")
+                    for warning in result["warnings"]:
+                        st.warning(warning)
+
+elif scheduler_mode == "LLM Agent":
+    st.caption("Gemini parses your request into scheduling constraints, then builds the schedule.")
+
+    user_request = st.text_area(
+        "What would you like to schedule?",
+        placeholder="e.g., Schedule my morning walk and feeding with a 15 min break",
+        height=80,
+        key="llm_request",
+    )
+
+    col_start, col_end = st.columns(2)
+    with col_start:
+        llm_start = st.time_input("Start time", value=datetime.strptime("08:00", "%H:%M").time(), key="llm_start")
+    with col_end:
+        llm_end = st.time_input("End time", value=datetime.strptime("20:00", "%H:%M").time(), key="llm_end")
+
+    if st.button("Generate schedule", key="llm_generate"):
+        if not st.session_state.tasks:
+            st.warning("Add at least one task before generating a schedule.")
+        elif not user_request.strip():
+            st.warning("Enter a scheduling request above.")
+        else:
+            owner = Owner(id="owner-1", name=owner_name)
+            pet = Pet(id="pet-1", name=pet_name, species=species)
+
+            for index, task_data in enumerate(st.session_state.tasks, start=1):
+                pet.add_task(
+                    Task(
+                        id=f"task-{index}",
+                        description=task_data["title"],
+                        duration_minutes=task_data["duration_minutes"],
+                    )
+                )
+
+            owner.add_pet(pet)
+            agent = SchedulingAgent(use_llm=True)
+
+            with st.spinner("Gemini is parsing your request..."):
+                today = datetime.now()
+                constraints = agent.gather_requirements(owner, user_request)
+                if not constraints.get("preferred_times"):
+                    constraints["start_time"] = datetime.combine(today.date(), llm_start)
+                    constraints["end_time"] = datetime.combine(today.date(), llm_end)
+
+
+            result = agent.generate_schedule(owner, constraints)
+            scheduled_tasks = result["tasks"]
+
+            if not scheduled_tasks:
+                st.info("No tasks could be scheduled in the selected time window.")
+            else:
+                st.success("Schedule generated.")
+                st.markdown("### Planned Tasks")
+                table_rows = [
+                    {
+                        "Task": task.description,
+                        "Start": task.scheduled_start.strftime("%H:%M") if task.scheduled_start else "-",
+                        "End": task.scheduled_end.strftime("%H:%M") if task.scheduled_end else "-",
+                        "Duration (min)": task.duration_minutes,
+                    }
+                    for task in scheduled_tasks
+                ]
+                st.table(table_rows)
+
+                coverage = result.get("coverage_rate", 1.0)
+                st.metric("Schedule Coverage", f"{coverage:.0%}", help="Percentage of pending tasks that fit in the time window")
+
+                if result["explanation"]:
+                    st.markdown("### Agent Explanation")
+                    st.code(result["explanation"], language="text")
+
+                if result["warnings"]:
+                    st.markdown("### Conflict Warnings")
+                    for warning in result["warnings"]:
+                        st.warning(warning)

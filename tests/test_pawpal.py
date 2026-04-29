@@ -1,5 +1,7 @@
+import json
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
 from pawpal_system import Task, Pet, Owner, Scheduler
 
 
@@ -427,4 +429,201 @@ def test_scheduling_agent_multiple_pets_same_owner():
 
     # Should schedule tasks from both pets
     assert len(result["tasks"]) == 2
+
+
+def test_scheduling_agent_break_between_morning_walk_and_feeding():
+    """
+    Prompt: 'schedule my morning walk and feeding with a 15 minute break'
+    The agent should parse the break request and leave at least a 15-minute
+    gap between consecutive tasks.
+    """
+    owner = Owner(id="o16", name="Dana")
+    pet = Pet(id="p18", name="Mochi", species="dog")
+    owner.add_pet(pet)
+
+    pet.add_task(Task(id="t170", description="Morning walk", duration_minutes=30))
+    pet.add_task(Task(id="t171", description="Feeding", duration_minutes=15))
+
+    agent = SchedulingAgent()
+    constraints = agent.gather_requirements(
+        owner, "schedule my morning walk and feeding with a 15 minute break"
+    )
+    # Pin times so the test is deterministic
+    constraints["start_time"] = datetime(2026, 4, 28, 7, 0)
+    constraints["end_time"] = datetime(2026, 4, 28, 12, 0)
+
+    result = agent.generate_schedule(owner, constraints)
+    scheduled = sorted(result["tasks"], key=lambda t: t.scheduled_start)
+
+    assert len(scheduled) == 2
+    assert constraints["break_minutes"] == 15
+
+    gap = scheduled[1].scheduled_start - scheduled[0].scheduled_end
+    assert gap >= timedelta(minutes=15), (
+        f"Expected at least 15 min break between tasks, got {gap.total_seconds() / 60:.0f} min"
+    )
+
+
+# ============================================
+# LLM Scheduler Test Cases
+# ============================================
+
+def _mock_gemini(llm_json: dict):
+    """Return a patch context that makes Gemini respond with llm_json."""
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(llm_json)
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+    return patch("pawpal_system.genai.Client", return_value=mock_client)
+
+
+def test_llm_agent_high_priority_task_scheduled_first():
+    """
+    High-priority tasks should appear before low-priority ones in the schedule,
+    even when the low-priority task is shorter (greedy would pick it first).
+    """
+    owner = Owner(id="o30", name="Dana")
+    pet = Pet(id="p30", name="Rex", species="dog")
+    owner.add_pet(pet)
+
+    # Low-priority task is shorter — greedy picks it first without priority logic
+    low_task  = Task(id="t300", description="Brush teeth", duration_minutes=10, priority="low")
+    high_task = Task(id="t301", description="Vet checkup",  duration_minutes=60, priority="high")
+    pet.add_task(low_task)
+    pet.add_task(high_task)
+
+    llm_output = {"preferred_times": [], "task_types": ["vet"], "break_minutes": 0, "pet_energy_levels": {}}
+    with _mock_gemini(llm_output):
+        agent = SchedulingAgent(use_llm=True)
+        constraints = agent.gather_requirements(owner, "schedule vet checkup (urgent) and teeth brushing")
+        constraints["start_time"] = datetime(2026, 4, 29, 8, 0)
+        constraints["end_time"]   = datetime(2026, 4, 29, 12, 0)
+
+        result = agent.generate_schedule(owner, constraints)
+        scheduled = sorted(result["tasks"], key=lambda t: t.scheduled_start)
+
+    assert len(scheduled) == 2
+    assert scheduled[0].id == "t301", (
+        f"Expected high-priority vet checkup first, got '{scheduled[0].description}'"
+    )
+
+
+def test_llm_agent_schedule_feasible_with_break_and_energy_level():
+    """
+    The generated schedule must:
+    - Fit entirely within the requested time window
+    - Leave at least the requested break gap between tasks
+    - Capture the pet's energy level in the constraints
+    """
+    owner = Owner(id="o31", name="Jordan")
+    pet = Pet(id="p31", name="Buddy", species="dog")
+    owner.add_pet(pet)
+
+    pet.add_task(Task(id="t310", description="Morning walk", duration_minutes=30))
+    pet.add_task(Task(id="t311", description="Feeding",      duration_minutes=15))
+
+    llm_output = {
+        "preferred_times": ["morning"],
+        "task_types": ["walk", "feed"],
+        "break_minutes": 15,
+        "pet_energy_levels": {"level": "low", "prefer_active_tasks": False},
+    }
+    with _mock_gemini(llm_output):
+        agent = SchedulingAgent(use_llm=True)
+        constraints = agent.gather_requirements(
+            owner, "morning walk and feeding with 15 min break, low energy dog"
+        )
+        start = datetime(2026, 4, 29, 7, 0)
+        end   = datetime(2026, 4, 29, 12, 0)
+        constraints["start_time"] = start
+        constraints["end_time"]   = end
+
+        result = agent.generate_schedule(owner, constraints)
+        scheduled = sorted(result["tasks"], key=lambda t: t.scheduled_start)
+
+    assert len(scheduled) == 2
+
+    gap = scheduled[1].scheduled_start - scheduled[0].scheduled_end
+    assert gap >= timedelta(minutes=15), (
+        f"Expected ≥15 min break, got {gap.total_seconds() / 60:.0f} min"
+    )
+    assert scheduled[0].scheduled_start >= start, "First task starts before the window"
+    assert scheduled[-1].scheduled_end  <= end,   "Last task ends after the window"
+    assert constraints["pet_energy_levels"]["level"] == "low"
+
+
+def test_llm_agent_explanation_covers_schedule_constraints():
+    """
+    The explanation returned by the agent should mention:
+    - The time window used
+    - How many tasks were scheduled
+    - The break time (when non-zero)
+    """
+    owner = Owner(id="o32", name="Casey")
+    pet = Pet(id="p32", name="Luna", species="cat")
+    owner.add_pet(pet)
+
+    pet.add_task(Task(id="t320", description="Morning walk", duration_minutes=30))
+    pet.add_task(Task(id="t321", description="Feeding",      duration_minutes=15))
+
+    llm_output = {
+        "preferred_times": ["morning"],
+        "task_types": ["walk", "feed"],
+        "break_minutes": 10,
+        "pet_energy_levels": {},
+    }
+    with _mock_gemini(llm_output):
+        agent = SchedulingAgent(use_llm=True)
+        constraints = agent.gather_requirements(owner, "morning walk and feeding with 10 min break")
+        constraints["start_time"] = datetime(2026, 4, 29, 7, 0)
+        constraints["end_time"]   = datetime(2026, 4, 29, 12, 0)
+
+        result = agent.generate_schedule(owner, constraints)
+
+    explanation = result["explanation"]
+    assert explanation, "Explanation should not be empty"
+    assert "07:00" in explanation or "7:00" in explanation, "Explanation should state the start time"
+    assert "2" in explanation, "Explanation should mention the number of scheduled tasks"
+    assert "10" in explanation, "Explanation should mention the 10-minute break"
+
+
+def test_llm_understands_synonyms_keyword_parser_misses():
+    """
+    The LLM should correctly parse intent that the keyword parser would miss:
+    - 'after lunch' → preferred_times includes 'afternoon'
+    - 'pup needs a scrub' → task_types includes 'bath'
+    - 'he's been zooming all day' → pet_energy_levels level is 'high'
+    """
+    owner = Owner(id="o33", name="Alex")
+    pet = Pet(id="p33", name="Zoomie", species="dog")
+    owner.add_pet(pet)
+    pet.add_task(Task(id="t330", description="Bath time", duration_minutes=20))
+
+    llm_output = {
+        "preferred_times": ["afternoon"],
+        "task_types": ["bath"],
+        "break_minutes": 0,
+        "pet_energy_levels": {"level": "high", "prefer_active_tasks": True},
+    }
+
+    with _mock_gemini(llm_output):
+        agent = SchedulingAgent(use_llm=True)
+        constraints = agent.gather_requirements(
+            owner, "after lunch my pup needs a scrub, he's been zooming all day"
+        )
+        constraints["start_time"] = datetime(2026, 4, 29, 12, 0)
+        constraints["end_time"]   = datetime(2026, 4, 29, 17, 0)
+
+        result = agent.generate_schedule(owner, constraints)
+
+    assert "afternoon" in constraints["preferred_times"], (
+        "LLM should map 'after lunch' to afternoon"
+    )
+    assert "bath" in constraints["task_types"], (
+        "LLM should map 'pup needs a scrub' to bath"
+    )
+    assert constraints["pet_energy_levels"].get("level") == "high", (
+        "LLM should map 'zooming all day' to high energy"
+    )
+    assert len(result["tasks"]) == 1, "Bath task should be scheduled in the afternoon window"
 
